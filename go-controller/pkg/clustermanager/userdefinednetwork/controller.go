@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -88,6 +90,23 @@ type Controller struct {
 	eventRecorder               record.EventRecorder
 }
 
+// getUDNWorkerCount returns the number of worker threads for UDN controllers.
+// Configurable via UDN_CONTROLLER_WORKERS environment variable, defaults to 10.
+func getUDNWorkerCount() int {
+	if val := os.Getenv("UDN_CONTROLLER_WORKERS"); val != "" {
+		if count, err := strconv.Atoi(val); err == nil && count > 0 {
+			if count > 50 {
+				klog.Warningf("UDN_CONTROLLER_WORKERS=%d exceeds recommended maximum of 50, using 50", count)
+				return 50
+			}
+			klog.Infof("Using UDN_CONTROLLER_WORKERS=%d", count)
+			return count
+		}
+		klog.Warningf("Invalid UDN_CONTROLLER_WORKERS=%q, using default 10", val)
+	}
+	return 10
+}
+
 func New(
 	nadClient netv1clientset.Interface,
 	nadInfomer netv1infomer.NetworkAttachmentDefinitionInformer,
@@ -119,7 +138,7 @@ func New(
 		RateLimiter:    workqueue.DefaultTypedControllerRateLimiter[string](),
 		Reconcile:      c.reconcileUDN,
 		ObjNeedsUpdate: c.udnNeedUpdate,
-		Threadiness:    1,
+		Threadiness:    getUDNWorkerCount(),
 		Informer:       udnInformer.Informer(),
 		Lister:         udnLister.List,
 	}
@@ -129,7 +148,7 @@ func New(
 		RateLimiter:    workqueue.DefaultTypedControllerRateLimiter[string](),
 		Reconcile:      c.reconcileCUDN,
 		ObjNeedsUpdate: c.cudnNeedUpdate,
-		Threadiness:    1,
+		Threadiness:    getUDNWorkerCount(),
 		Informer:       cudnInformer.Informer(),
 		Lister:         cudnLister.List,
 	}
@@ -360,7 +379,13 @@ func (c *Controller) UpdateSubsystemCondition(
 	return nil
 }
 
-func (c *Controller) udnNeedUpdate(_, _ *userdefinednetworkv1.UserDefinedNetwork) bool {
+func (c *Controller) udnNeedUpdate(old, new *userdefinednetworkv1.UserDefinedNetwork) bool {
+	// Skip reconciliation for status-only updates
+	if new.Generation == old.Generation {
+		klog.V(5).Infof("Skipping status-only update for UDN %s/%s (generation %d)",
+			new.Namespace, new.Name, new.Generation)
+		return false
+	}
 	return true
 }
 
@@ -506,7 +531,13 @@ func newNetworkCreatedCondition(nad *netv1.NetworkAttachmentDefinition, syncErro
 	return networkCreatedCondition
 }
 
-func (c *Controller) cudnNeedUpdate(_ *userdefinednetworkv1.ClusterUserDefinedNetwork, _ *userdefinednetworkv1.ClusterUserDefinedNetwork) bool {
+func (c *Controller) cudnNeedUpdate(old, new *userdefinednetworkv1.ClusterUserDefinedNetwork) bool {
+	// Skip reconciliation for status-only updates
+	if new.Generation == old.Generation {
+		klog.V(5).Infof("Skipping status-only update for ClusterUDN %s (generation %d)",
+			new.Name, new.Generation)
+		return false
+	}
 	return true
 }
 
